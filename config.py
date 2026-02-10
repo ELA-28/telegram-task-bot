@@ -18,6 +18,16 @@ class Settings(BaseSettings):
         # Приоритет для DATABASE_URL из environment (Neon)
         db_url = os.environ.get("DATABASE_URL")
         if db_url:
+            # Очищаем URL от лишних символов
+            db_url = db_url.strip()
+            # Убираем префикс "psql " если есть
+            if db_url.startswith("psql "):
+                db_url = db_url[5:].strip()
+            # Убираем кавычки если есть
+            if db_url.startswith("'") or db_url.startswith('"'):
+                db_url = db_url[1:]
+            if db_url.endswith("'") or db_url.endswith('"'):
+                db_url = db_url[:-1]
             # Преобразуем postgres:// в postgresql+asyncpg:// для SQLAlchemy async
             if db_url.startswith("postgres://"):
                 db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
