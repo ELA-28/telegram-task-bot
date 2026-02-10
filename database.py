@@ -76,6 +76,7 @@ async def create_task(user_id: int, title: str, description: str = None,
                       priority: str = "medium", category_id: int = None,
                       deadline: datetime = None, estimated_time: int = None) -> Task:
     """Создать новую задачу"""
+    from sqlalchemy.orm import selectinload
     async with get_session() as session:
         task = Task(
             user_id=user_id,
@@ -88,15 +89,20 @@ async def create_task(user_id: int, title: str, description: str = None,
         )
         session.add(task)
         await session.flush()
-        await session.refresh(task)
+        # Загружаем связанные данные перед refresh
+        await session.refresh(task, attribute_names=['category', 'subtasks'])
         return task
 
 
 async def get_user_tasks(user_id: int, status: str = None,
                          category_id: int = None) -> List[Task]:
     """Получить задачи пользователя с фильтрацией"""
+    from sqlalchemy.orm import selectinload
     async with get_session() as session:
-        query = select(Task).where(Task.user_id == user_id)
+        query = select(Task).options(
+            selectinload(Task.category),
+            selectinload(Task.subtasks)
+        ).where(Task.user_id == user_id)
 
         if status:
             query = query.where(Task.status == status)
@@ -111,9 +117,15 @@ async def get_user_tasks(user_id: int, status: str = None,
 
 async def get_task_by_id(task_id: int, user_id: int) -> Optional[Task]:
     """Получить задачу по ID с проверкой владельца"""
+    from sqlalchemy.orm import selectinload
     async with get_session() as session:
         result = await session.execute(
-            select(Task).where(
+            select(Task)
+            .options(
+                selectinload(Task.category),
+                selectinload(Task.subtasks)
+            )
+            .where(
                 and_(Task.id == task_id, Task.user_id == user_id)
             )
         )
@@ -218,18 +230,24 @@ async def create_category(user_id: int, name: str, color: str = "#3498db") -> Ca
 
 async def get_user_categories(user_id: int) -> List[Category]:
     """Получить категории пользователя"""
+    from sqlalchemy.orm import selectinload
     async with get_session() as session:
         result = await session.execute(
-            select(Category).where(Category.user_id == user_id).order_by(Category.name)
+            select(Category)
+            .options(selectinload(Category.tasks))
+            .where(Category.user_id == user_id)
+            .order_by(Category.name)
         )
         return result.scalars().all()
 
 
 async def get_category_by_id(category_id: int, user_id: int) -> Optional[Category]:
-    """Получить категорию по ID"""
+    """Получить категорию по ID с задачами"""
     async with get_session() as session:
         result = await session.execute(
-            select(Category).where(
+            select(Category)
+            .options(selectinload(Category.tasks))
+            .where(
                 and_(Category.id == category_id, Category.user_id == user_id)
             )
         )
@@ -251,6 +269,29 @@ async def delete_category(category_id: int, user_id: int) -> bool:
             return True
 
         return False
+
+
+async def update_category(category_id: int, user_id: int, **kwargs) -> Optional[Category]:
+    """Обновить категорию с задачами"""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Category)
+            .options(selectinload(Category.tasks))
+            .where(
+                and_(Category.id == category_id, Category.user_id == user_id)
+            )
+        )
+        category = result.scalar_one_or_none()
+
+        if category:
+            for key, value in kwargs.items():
+                if hasattr(category, key) and value is not None:
+                    setattr(category, key, value)
+
+            await session.flush()
+            await session.refresh(category)
+
+        return category
 
 
 # ========== Subtask Operations ==========

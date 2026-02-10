@@ -4,6 +4,6 @@ aiosqlite==0.20.0
 python-dotenv==1.0.1
 openai==1.57.4
 apscheduler==3.10.4
-pydantic==2.10.2
-pydantic-settings==2.6.1
-dateutils==0.6.12
+pydantic>=2.4.1,<2.10
+pydantic-settings>=2.0
+python-dateutil>=2.8.0

@@ -3,6 +3,16 @@ from typing import Optional
 import pytz
 
 
+def escape_markdown(text: str) -> str:
+    """Экранировать спецсимволы Markdown"""
+    if not text:
+        return text
+    special_chars = r'_*[]()~`>#+-=|{}.!'
+    for char in special_chars:
+        text = text.replace(char, '\\' + char)
+    return text
+
+
 def format_task(task) -> str:
     """Отформатировать задачу для отображения"""
     priority_emoji = {
@@ -34,7 +44,10 @@ def format_task(task) -> str:
 
     if task.deadline:
         deadline_str = format_datetime(task.deadline)
-        is_overdue = task.deadline < datetime.now(pytz.UTC) and task.status != "completed"
+        # Убедимся что оба datetime имеют timezone для сравнения
+        now = datetime.now(pytz.UTC)
+        deadline_check = task.deadline if task.deadline.tzinfo else task.deadline.replace(tzinfo=pytz.UTC)
+        is_overdue = deadline_check < now and task.status != "completed"
         overdue_text = " ⚠️ *ПРОСРОЧЕНО*" if is_overdue else ""
         lines.append(f"⏰ Дедлайн: {deadline_str}{overdue_text}")
 
@@ -220,7 +233,9 @@ def get_task_priority_score(task) -> int:
 
     # Если есть дедлайн, учитываем его
     if task.deadline:
-        days_until = (task.deadline - datetime.now(pytz.UTC)).days
+        now = datetime.now(pytz.UTC)
+        deadline = task.deadline if task.deadline.tzinfo else task.deadline.replace(tzinfo=pytz.UTC)
+        days_until = (deadline - now).days
         score += max(0, min(days_until, 30)) * 10
 
     # Задачи в процессе имеют больший приоритет

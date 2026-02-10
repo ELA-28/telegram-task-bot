@@ -1,18 +1,20 @@
 import asyncio
 import logging
+import io
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardRemove
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import get_settings
 from database import (
     init_db, get_or_create_user, create_task, get_user_tasks,
     get_task_by_id, update_task, delete_task, get_user_categories,
-    create_category, get_category_by_id, delete_category,
+    create_category, get_category_by_id, delete_category, update_category,
     create_subtask, toggle_subtask, get_user_statistics,
     get_tasks_due_soon, mark_reminder_sent
 )
@@ -26,7 +28,8 @@ from keyboards import (
 from utils import (
     format_task, format_task_short, format_category, format_datetime,
     format_duration, translate_priority, translate_status, parse_deadline,
-    format_statistics, validate_title, calculate_remind_time, get_task_priority_score
+    format_statistics, validate_title, calculate_remind_time, get_task_priority_score,
+    escape_markdown
 )
 from ai_helper import AIHelper
 
@@ -53,6 +56,7 @@ class TaskStates(StatesGroup):
 class CategoryStates(StatesGroup):
     name = State()
     color = State()
+    rename = State()
 
 class SubtaskStates(StatesGroup):
     title = State()
@@ -135,14 +139,36 @@ async def show_tasks(message: types.Message, state: FSMContext):
     await state.clear()
 
     user = await get_or_create_user(telegram_id=message.from_user.id)
-    tasks = await get_user_tasks(user.id)
+
+    # Отладочное логирование
+    logging.info(f"show_tasks: user_id={user.id}, telegram_id={message.from_user.id}")
+
+    all_tasks = await get_user_tasks(user.id)
+
+    # Отладочное логирование
+    logging.info(f"show_tasks: got {len(all_tasks)} tasks from DB")
+    for t in all_tasks:
+        logging.info(f"  - Task: id={t.id}, title={t.title}, status={t.status}")
+
+    # Показываем только невыполненные задачи
+    tasks = [t for t in all_tasks if t.status != "completed"]
+    completed_count = len(all_tasks) - len(tasks)
+
+    logging.info(f"show_tasks: filtered {len(tasks)} active tasks, {completed_count} completed")
 
     if not tasks:
-        await message.answer(
-            "У вас пока нет задач.\n\n"
-            "Нажмите ➕ *Добавить задачу* чтобы создать первую!",
-            reply_markup=get_main_menu_keyboard()
-        )
+        if completed_count > 0:
+            await message.answer(
+                f"✅ Все ваши задачи выполнены! ({completed_count})\n\n"
+                f"Нажмите ➕ *Добавить задачу* чтобы создать новую!",
+                reply_markup=get_main_menu_keyboard()
+            )
+        else:
+            await message.answer(
+                "У вас пока нет задач.\n\n"
+                "Нажмите ➕ *Добавить задачу* чтобы создать первую!",
+                reply_markup=get_main_menu_keyboard()
+            )
         return
 
     # Готовим данные для клавиатуры
@@ -151,8 +177,10 @@ async def show_tasks(message: types.Message, state: FSMContext):
         for t in sorted(tasks, key=get_task_priority_score)
     ]
 
+    completed_text = f"\n✅ Выполненных: {completed_count}" if completed_count > 0 else ""
+
     await message.answer(
-        f"📋 *Ваши задачи* ({len(tasks)})\n\n"
+        f"📋 *Активные задачи* ({len(tasks)}){completed_text}\n\n"
         f"Выберите задачу для просмотра:",
         reply_markup=get_tasks_list_keyboard(tasks_data)
     )
@@ -162,13 +190,72 @@ async def show_tasks(message: types.Message, state: FSMContext):
 async def tasks_list_callback(callback: types.CallbackQuery):
     """Обработчик возврата к списку задач"""
     user = await get_or_create_user(telegram_id=callback.from_user.id)
+    all_tasks = await get_user_tasks(user.id)
+
+    # Показываем только невыполненные задачи
+    tasks = [t for t in all_tasks if t.status != "completed"]
+    completed_count = len(all_tasks) - len(tasks)
+
+    if not tasks:
+        if completed_count > 0:
+            await callback.message.edit_text(
+                f"✅ Все задачи выполнены! ({completed_count})\n\n"
+                f"Создайте новую или посмотрите выполненные через фильтр."
+            )
+        else:
+            await callback.message.edit_text(
+                "У вас пока нет задач.\n\n"
+                "Нажмите ➕ Добавить задачу чтобы создать первую!"
+            )
+        await callback.answer()
+        return
+
+    tasks_data = [
+        (t.id, t.title, t.status, t.priority)
+        for t in sorted(tasks, key=get_task_priority_score)
+    ]
+
+    completed_text = f"\n✅ Выполненных: {completed_count}" if completed_count > 0 else ""
+
+    await callback.message.edit_text(
+        f"📋 *Активные задачи* ({len(tasks)}){completed_text}\n\n"
+        f"Выберите задачу для просмотра:",
+        reply_markup=get_tasks_list_keyboard(tasks_data)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "filter_completed")
+async def show_completed_tasks(callback: types.CallbackQuery):
+    """Показать выполненные задачи"""
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+    tasks = await get_user_tasks(user.id, status="completed")
+
+    if not tasks:
+        await callback.answer("Нет выполненных задач", show_alert=True)
+        return
+
+    tasks_data = [
+        (t.id, t.title, t.status, t.priority)
+        for t in sorted(tasks, key=get_task_priority_score)
+    ]
+
+    await callback.message.edit_text(
+        f"✅ *Выполненные задачи* ({len(tasks)})\n\n"
+        f"Выберите задачу для просмотра:",
+        reply_markup=get_tasks_list_keyboard(tasks_data)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "filter_all")
+async def show_all_tasks(callback: types.CallbackQuery):
+    """Показать все задачи"""
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
     tasks = await get_user_tasks(user.id)
 
     if not tasks:
-        await callback.message.edit_text(
-            "У вас пока нет задач.\n\n"
-            "Нажмите ➕ *Добавить задачу* чтобы создать первую!"
-        )
+        await callback.message.edit_text("У вас пока нет задач.")
         await callback.answer()
         return
 
@@ -178,7 +265,102 @@ async def tasks_list_callback(callback: types.CallbackQuery):
     ]
 
     await callback.message.edit_text(
-        f"📋 *Ваши задачи* ({len(tasks)})\n\n"
+        f"📋 *Все задачи* ({len(tasks)})\n\n"
+        f"Выберите задачу для просмотра:",
+        reply_markup=get_tasks_list_keyboard(tasks_data)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "tasks_by_category")
+async def show_tasks_by_category(callback: types.CallbackQuery):
+    """Показать задачи по категориям"""
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+    tasks = await get_user_tasks(user.id)
+    categories = await get_user_categories(user.id)
+
+    if not tasks:
+        await callback.answer("Нет задач", show_alert=True)
+        return
+
+    # Создаем словарь категорий для быстрого доступа
+    category_map = {c.id: c.name for c in categories}
+
+    # Группируем задачи по категориям
+    tasks_by_cat = {}
+    for task in tasks:
+        cat_id = task.category_id
+        cat_name = category_map.get(cat_id, "Без категории")
+
+        if cat_name not in tasks_by_cat:
+            tasks_by_cat[cat_name] = []
+        tasks_by_cat[cat_name].append(task)
+
+    # Формируем текст
+    text = "📋 *Задачи по категориям*\n\n"
+
+    # Сортируем категории по названию
+    for cat_name in sorted(tasks_by_cat.keys()):
+        cat_tasks = tasks_by_cat[cat_name]
+
+        # Считаем задачи по статусу
+        total = len(cat_tasks)
+        completed = sum(1 for t in cat_tasks if t.status == "completed")
+        active = total - completed
+
+        text += f"📁 *{escape_markdown(cat_name)}*\n"
+        text += f"   Активных: {active} | Выполнено: {completed}\n"
+
+        # Показываем только активные задачи
+        active_tasks = [t for t in cat_tasks if t.status != "completed"]
+        for task in sorted(active_tasks, key=get_task_priority_score):
+            priority_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴"}.get(task.priority, "⚪")
+            text += f"   {priority_emoji} {escape_markdown(task.title)}\n"
+            if task.description:
+                text += f"      └ {escape_markdown(task.description)}\n"
+
+        text += "\n"
+
+    # Общие итоги
+    total_tasks = len(tasks)
+    total_completed = sum(1 for t in tasks if t.status == "completed")
+    total_active = total_tasks - total_completed
+
+    text = f"📊 *Всего*: {total_active} активных / {total_completed} выполнено\n\n{text}"
+
+    await callback.message.edit_text(text, parse_mode="Markdown")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "tasks_refresh")
+async def refresh_tasks(callback: types.CallbackQuery):
+    """Обновить список задач (показать активные)"""
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+    all_tasks = await get_user_tasks(user.id)
+
+    # Показываем только невыполненные задачи
+    tasks = [t for t in all_tasks if t.status != "completed"]
+    completed_count = len(all_tasks) - len(tasks)
+
+    if not tasks:
+        if completed_count > 0:
+            await callback.message.edit_text(
+                f"✅ Все задачи выполнены! ({completed_count})"
+            )
+        else:
+            await callback.message.edit_text("У вас пока нет задач.")
+        await callback.answer()
+        return
+
+    tasks_data = [
+        (t.id, t.title, t.status, t.priority)
+        for t in sorted(tasks, key=get_task_priority_score)
+    ]
+
+    completed_text = f"\n✅ Выполненных: {completed_count}" if completed_count > 0 else ""
+
+    await callback.message.edit_text(
+        f"📋 *Активные задачи* ({len(tasks)}){completed_text}\n\n"
         f"Выберите задачу для просмотра:",
         reply_markup=get_tasks_list_keyboard(tasks_data)
     )
@@ -215,10 +397,30 @@ async def complete_task(callback: types.CallbackQuery):
 
     if task:
         await callback.answer("✅ Задача выполнена!")
+
+        # Возвращаемся к списку активных задач
+        all_tasks = await get_user_tasks(user.id)
+        tasks = [t for t in all_tasks if t.status != "completed"]
+        completed_count = len(all_tasks) - len(tasks)
+
+        if not tasks:
+            await callback.message.edit_text(
+                f"✅ Все задачи выполнены! ({completed_count})\n\n"
+                f"Нажмите ➕ Добавить задачу чтобы создать новую."
+            )
+            return
+
+        tasks_data = [
+            (t.id, t.title, t.status, t.priority)
+            for t in sorted(tasks, key=get_task_priority_score)
+        ]
+
+        completed_text = f"\n✅ Выполненных: {completed_count}" if completed_count > 0 else ""
+
         await callback.message.edit_text(
-            format_task(task),
-            parse_mode="Markdown",
-            reply_markup=get_task_actions_keyboard(task_id)
+            f"📋 *Активные задачи* ({len(tasks)}){completed_text}\n\n"
+            f"Выберите задачу для просмотра:",
+            reply_markup=get_tasks_list_keyboard(tasks_data)
         )
     else:
         await callback.answer("Ошибка", show_alert=True)
@@ -264,24 +466,35 @@ async def confirm_delete_task(callback: types.CallbackQuery):
 
     if success:
         await callback.answer("🗑️ Задача удалена")
-        # Возвращаемся к списку задач
-        tasks = await get_user_tasks(user.id)
+        # Возвращаемся к списку активных задач
+        all_tasks = await get_user_tasks(user.id)
+        tasks = [t for t in all_tasks if t.status != "completed"]
+        completed_count = len(all_tasks) - len(tasks)
 
         if tasks:
             tasks_data = [
                 (t.id, t.title, t.status, t.priority)
                 for t in sorted(tasks, key=get_task_priority_score)
             ]
+
+            completed_text = f"\n✅ Выполненных: {completed_count}" if completed_count > 0 else ""
+
             await callback.message.edit_text(
-                f"📋 *Ваши задачи* ({len(tasks)})",
+                f"📋 *Активные задачи* ({len(tasks)}){completed_text}\n\n"
+                f"Выберите задачу для просмотра:",
                 reply_markup=get_tasks_list_keyboard(tasks_data)
             )
         else:
-            await callback.message.edit_text(
-                "У вас пока нет задач.\n\n"
-                "Нажмите ➕ *Добавить задачу* чтобы создать первую!",
-                reply_markup=get_main_menu_keyboard()
-            )
+            if completed_count > 0:
+                await callback.message.edit_text(
+                    f"✅ Все задачи выполнены! ({completed_count})\n\n"
+                    f"Нажмите ➕ Добавить задачу чтобы создать новую."
+                )
+            else:
+                await callback.message.edit_text(
+                    "У вас пока нет задач.\n\n"
+                    "Нажмите ➕ Добавить задачу чтобы создать первую!"
+                )
     else:
         await callback.answer("Ошибка удаления", show_alert=True)
 
@@ -353,8 +566,9 @@ async def add_task_priority(callback: types.CallbackQuery, state: FSMContext):
 
     categories_data = [(c.id, c.name, c.color) for c in categories]
 
-    await callback.message.edit_text(
-        "Выберите категорию (или /skip чтобы пропустить):",
+    # Отправляем новое сообщение вместо редактирования
+    await callback.message.answer(
+        "Выберите категорию:",
         reply_markup=get_categories_keyboard(categories_data, add_task=True)
     )
     await callback.answer()
@@ -372,7 +586,22 @@ async def add_task_category(callback: types.CallbackQuery, state: FSMContext):
 
     await state.set_state(TaskStates.deadline)
 
-    await callback.message.edit_text(
+    # Отправляем новое сообщение вместо редактирования
+    await callback.message.answer(
+        "Введите дедлайн в формате: DD.MM.YYYY HH:MM\n"
+        "Или отправьте /skip чтобы пропустить:",
+        reply_markup=get_cancel_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(TaskStates.category, F.data == "set_category_none")
+async def add_task_no_category(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка пропуска категории"""
+    await state.update_data(category_id=None)
+    await state.set_state(TaskStates.deadline)
+
+    await callback.message.answer(
         "Введите дедлайн в формате: DD.MM.YYYY HH:MM\n"
         "Или отправьте /skip чтобы пропустить:",
         reply_markup=get_cancel_keyboard()
@@ -399,6 +628,9 @@ async def add_task_deadline(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user = await get_or_create_user(telegram_id=message.from_user.id)
 
+    # Отладочное логирование
+    logging.info(f"Creating task: user_id={user.id}, title={data.get('title')}, priority={data.get('priority')}")
+
     task = await create_task(
         user_id=user.id,
         title=data['title'],
@@ -408,12 +640,36 @@ async def add_task_deadline(message: types.Message, state: FSMContext):
         deadline=deadline
     )
 
+    # Отладочное логирование
+    logging.info(f"Task created: id={task.id}, status={task.status}")
+
     await state.clear()
 
+    # Показываем короткое подтверждение и сразу список задач
     await message.answer(
-        f"✅ *Задача создана!*\n\n{format_task(task)}",
-        parse_mode="Markdown",
+        f"✅ Задача \"{task.title}\" создана!",
         reply_markup=get_main_menu_keyboard()
+    )
+
+    # Сразу показываем список активных задач
+    all_tasks = await get_user_tasks(user.id)
+    tasks = [t for t in all_tasks if t.status != "completed"]
+    completed_count = len(all_tasks) - len(tasks)
+
+    if not tasks:
+        return
+
+    tasks_data = [
+        (t.id, t.title, t.status, t.priority)
+        for t in sorted(tasks, key=get_task_priority_score)
+    ]
+
+    completed_text = f"\n✅ Выполненных: {completed_count}" if completed_count > 0 else ""
+
+    await message.answer(
+        f"📋 *Активные задачи* ({len(tasks)}){completed_text}\n\n"
+        f"Выберите задачу для просмотра:",
+        reply_markup=get_tasks_list_keyboard(tasks_data)
     )
 
 
@@ -452,8 +708,14 @@ async def show_categories(message: types.Message):
 @dp.callback_query(F.data == "category_new")
 async def new_category(callback: types.CallbackQuery, state: FSMContext):
     """Создание новой категории"""
+    # Сохраняем текущее состояние, чтобы вернуться после создания категории
+    current_state = await state.get_state()
+    await state.update_data(return_to_task_creation=current_state == TaskStates.category)
+
     await state.set_state(CategoryStates.name)
-    await callback.message.edit_text(
+
+    # Отправляем новое сообщение вместо редактирования
+    await callback.message.answer(
         "📁 *Создание категории*\n\n"
         "Введите название категории:",
         parse_mode="Markdown"
@@ -478,13 +740,273 @@ async def category_name(message: types.Message, state: FSMContext):
 
     category = await create_category(user.id, name)
 
+    # Проверяем - нужно ли вернуться к созданию задачи
+    data = await state.get_data()
+    return_to_task = data.get('return_to_task_creation', False)
+
+    # Очищаем только состояние категории, но сохраняем данные
+    current_data = await state.get_data()
+    await state.set_state(TaskStates.category)
+
+    if return_to_task:
+        # Возвращаемся к выбору категории для задачи
+        # Загружаем категории заново
+        categories = await get_user_categories(user.id)
+        categories_data = [(c.id, c.name, c.color) for c in categories]
+
+        await message.answer(
+            f"✅ Категория \"{name}\" создана!\n\nВыберите категорию для задачи:",
+            reply_markup=get_categories_keyboard(categories_data, add_task=True)
+        )
+    else:
+        await state.clear()
+        await message.answer(
+            f"✅ Категория *{name}* создана!",
+            parse_mode="Markdown",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+@dp.callback_query(F.data.startswith("category_"))
+async def view_category(callback: types.CallbackQuery):
+    """Просмотр категории и действий над ней"""
+    # Пропускаем callback для создания новой категории
+    if callback.data == "category_new":
+        return
+
+    category_id = int(callback.data.split("_")[1])
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+
+    category = await get_category_by_id(category_id, user.id)
+
+    if not category:
+        await callback.answer("Категория не найдена", show_alert=True)
+        return
+
+    task_count = len(category.tasks) if hasattr(category, 'tasks') else 0
+
+    await callback.message.edit_text(
+        f"📁 *{category.name}*\n\n"
+        f"Задач: {task_count}\n"
+        f"Цвет: {category.color}\n\n"
+        f"Выберите действие:",
+        parse_mode="Markdown",
+        reply_markup=get_category_actions_keyboard(category_id)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cat_delete_"))
+async def delete_category_callback(callback: types.CallbackQuery):
+    """Удаление категории с подтверждением"""
+    category_id = int(callback.data.split("_")[2])
+
+    await callback.message.edit_reply_markup(
+        reply_markup=get_confirmation_keyboard("delete_category", category_id)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("confirm_delete_category_"))
+async def confirm_delete_category(callback: types.CallbackQuery):
+    """Подтверждение удаления категории"""
+    category_id = int(callback.data.split("_")[3])
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+
+    success = await delete_category(category_id, user.id)
+
+    if success:
+        await callback.answer("🗑️ Категория удалена")
+
+        # Показываем обновленный список категорий
+        categories = await get_user_categories(user.id)
+
+        if not categories:
+            await callback.message.edit_text(
+                "У вас больше нет категорий.\n\n"
+                "Создайте новую для организации задач!"
+            )
+            return
+
+        text = "📁 *Ваши категории*\n\n"
+        for cat in categories:
+            task_count = len(cat.tasks) if hasattr(cat, 'tasks') else 0
+            text += f"📁 *{cat.name}*\nЗадач: {task_count}\n\n"
+
+        categories_data = [(c.id, c.name, c.color) for c in categories]
+
+        await callback.message.edit_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=get_categories_keyboard(categories_data)
+        )
+    else:
+        await callback.answer("Ошибка удаления", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("cat_rename_"))
+async def rename_category_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Начало переименования категории"""
+    category_id = int(callback.data.split("_")[2])
+    await state.update_data(category_id=category_id)
+    await state.set_state(CategoryStates.rename)
+
+    await callback.message.answer(
+        "✏️ Введите новое название категории:",
+        reply_markup=get_cancel_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.message(CategoryStates.rename)
+async def category_rename(message: types.Message, state: FSMContext):
+    """Обработка нового названия категории"""
+    name = message.text.strip()
+
+    if len(name) < 2:
+        await message.answer("Название слишком короткое (минимум 2 символа)")
+        return
+
+    if len(name) > 100:
+        await message.answer("Название слишком длинное (максимум 100 символов)")
+        return
+
+    data = await state.get_data()
+    category_id = data.get('category_id')
+    user = await get_or_create_user(telegram_id=message.from_user.id)
+
+    category = await update_category(category_id, user.id, name=name)
+
     await state.clear()
 
-    await message.answer(
-        f"✅ Категория *{name}* создана!",
-        parse_mode="Markdown",
-        reply_markup=get_main_menu_keyboard()
+    if category:
+        task_count = len(category.tasks) if hasattr(category, 'tasks') else 0
+
+        await message.answer(
+            f"✅ Категория переименована в *{name}*!",
+            parse_mode="Markdown",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+        # Показываем обновленную категорию
+        await message.answer(
+            f"📁 *{category.name}*\n\n"
+            f"Задач: {task_count}\n"
+            f"Цвет: {category.color}\n\n"
+            f"Выберите действие:",
+            parse_mode="Markdown",
+            reply_markup=get_category_actions_keyboard(category_id)
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка: категория не найдена",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+@dp.callback_query(F.data.startswith("cat_color_"))
+async def color_category_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Изменение цвета категории"""
+    category_id = int(callback.data.split("_")[2])
+    await state.update_data(category_id=category_id)
+    await state.set_state(CategoryStates.color)
+
+    # Предлагаем выбрать из предустановленных цветов (используем простые коды)
+    colors_keyboard = InlineKeyboardBuilder()
+    colors = [
+        ("🔴 Красный", "red"),
+        ("🟠 Оранжевый", "orange"),
+        ("🟡 Желтый", "yellow"),
+        ("🟢 Зеленый", "green"),
+        ("🔵 Голубой", "blue"),
+        ("🟣 Фиолетовый", "purple"),
+        ("⚫ Черный", "black"),
+        ("⚪ Серый", "gray"),
+    ]
+
+    for text, color_code in colors:
+        colors_keyboard.row(
+            InlineKeyboardButton(text=text, callback_data=f"color_{color_code}")
+        )
+
+    colors_keyboard.row(InlineKeyboardButton(text="◀️ Отмена", callback_data="cancel"))
+
+    await callback.message.edit_text(
+        "🎨 Выберите новый цвет:",
+        reply_markup=colors_keyboard.as_markup()
     )
+    await callback.answer()
+
+
+@dp.callback_query(CategoryStates.color, F.data.startswith("color_"))
+async def set_category_color(callback: types.CallbackQuery, state: FSMContext):
+    """Установка нового цвета категории"""
+    # Карта кодов цветов в hex
+    color_map = {
+        "red": "#e74c3c",
+        "orange": "#e67e22",
+        "yellow": "#f1c40f",
+        "green": "#2ecc71",
+        "blue": "#3498db",
+        "purple": "#9b59b6",
+        "black": "#34495e",
+        "gray": "#95a5a6",
+    }
+
+    color_code = callback.data.split("_")[1]
+    hex_color = color_map.get(color_code, "#3498db")
+
+    data = await state.get_data()
+    category_id = data.get('category_id')
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+
+    category = await update_category(category_id, user.id, color=hex_color)
+
+    await state.clear()
+
+    if category:
+        task_count = len(category.tasks) if hasattr(category, 'tasks') else 0
+
+        await callback.message.edit_text(
+            f"📁 *{category.name}*\n\n"
+            f"Задач: {task_count}\n"
+            f"Цвет: {category.color}\n\n"
+            f"Выберите действие:",
+            parse_mode="Markdown",
+            reply_markup=get_category_actions_keyboard(category_id)
+        )
+        await callback.answer("🎨 Цвет изменен!")
+    else:
+        await callback.answer("Ошибка", show_alert=True)
+
+
+@dp.callback_query(F.data == "categories_list")
+async def categories_list_callback(callback: types.CallbackQuery):
+    """Возврат к списку категорий"""
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+    categories = await get_user_categories(user.id)
+
+    if not categories:
+        await callback.message.edit_text(
+            "У вас пока нет категорий.\n\n"
+            "Создайте первую категорию для организации задач!"
+        )
+        await callback.answer()
+        return
+
+    text = "📁 *Ваши категории*\n\n"
+    for cat in categories:
+        task_count = len(cat.tasks) if hasattr(cat, 'tasks') else 0
+        text += f"📁 *{cat.name}*\nЗадач: {task_count}\n\n"
+
+    categories_data = [(c.id, c.name, c.color) for c in categories]
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_categories_keyboard(categories_data)
+    )
+    await callback.answer()
 
 
 # ========== Statistics ==========

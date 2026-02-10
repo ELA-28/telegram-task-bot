@@ -80,6 +80,12 @@ def get_tasks_list_keyboard(tasks: List[tuple], page: int = 0, page_size: int = 
     if nav_buttons:
         builder.row(*nav_buttons)
 
+    # Кнопки фильтрации и действий
+    builder.row(
+        InlineKeyboardButton(text="✅ Выполненные", callback_data="filter_completed"),
+        InlineKeyboardButton(text="📋 Все задачи", callback_data="filter_all")
+    )
+    builder.row(InlineKeyboardButton(text="📁 По категориям", callback_data="tasks_by_category"))
     builder.row(InlineKeyboardButton(text="🔄 Обновить", callback_data="tasks_refresh"))
     builder.row(InlineKeyboardButton(text="◀️ В меню", callback_data="main_menu"))
 

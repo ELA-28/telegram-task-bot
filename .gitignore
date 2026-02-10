@@ -50,3 +50,6 @@ Thumbs.db
 
 # AI
 OPENAI_API_KEY=*
+
+# Temporary files
+nul
