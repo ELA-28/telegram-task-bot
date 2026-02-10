@@ -45,11 +45,6 @@ class Settings(BaseSettings):
                 db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
             elif db_url.startswith("postgresql://"):
                 db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            # Добавляем параметры пула для Neon (закрывает idle соединения)
-            if "?" not in db_url:
-                db_url += "?pool_pre_ping=true&pool_size=5&max_overflow=10&pool_timeout=30&pool_recycle=300"
-            else:
-                db_url += "&pool_pre_ping=true&pool_size=5&max_overflow=10&pool_timeout=30&pool_recycle=300"
             self.database_url = db_url
         # Если на Render нет DATABASE_URL, используем SQLite (локально)
         elif os.environ.get("RENDER") == "true":
