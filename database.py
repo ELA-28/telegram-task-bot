@@ -25,6 +25,8 @@ async_session_maker = async_sessionmaker(
 async def init_db():
     """Инициализация базы данных - создание всех таблиц"""
     async with engine.begin() as conn:
+        # Пересоздаём таблицы для обновления схемы telegram_id на BIGINT
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
 
