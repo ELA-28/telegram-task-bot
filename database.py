@@ -144,9 +144,15 @@ async def get_task_by_id(task_id: int, user_id: int) -> Optional[Task]:
 
 async def update_task(task_id: int, user_id: int, **kwargs) -> Optional[Task]:
     """Обновить задачу"""
+    from sqlalchemy.orm import selectinload
     async with get_session() as session:
         result = await session.execute(
-            select(Task).where(
+            select(Task)
+            .options(
+                selectinload(Task.category),
+                selectinload(Task.subtasks)
+            )
+            .where(
                 and_(Task.id == task_id, Task.user_id == user_id)
             )
         )
@@ -161,7 +167,7 @@ async def update_task(task_id: int, user_id: int, **kwargs) -> Optional[Task]:
                 task.completed_at = datetime.utcnow()
 
             await session.flush()
-            await session.refresh(task)
+            await session.refresh(task, attribute_names=['category', 'subtasks'])
 
         return task
 
