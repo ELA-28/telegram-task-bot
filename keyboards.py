@@ -292,3 +292,24 @@ def get_cancel_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
     return keyboard
+
+
+# ========== Edit Task ==========
+def get_edit_task_keyboard(task_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура выбора поля для редактирования задачи"""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(text="📝 Название", callback_data=f"edit_title_{task_id}"),
+        InlineKeyboardButton(text="📄 Описание", callback_data=f"edit_desc_{task_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🎯 Приоритет", callback_data=f"edit_priority_{task_id}"),
+        InlineKeyboardButton(text="📅 Дедлайн", callback_data=f"edit_deadline_{task_id}"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📁 Категория", callback_data=f"edit_category_{task_id}"),
+    )
+    builder.row(InlineKeyboardButton(text="◀️ К задаче", callback_data=f"task_view_{task_id}"))
+
+    return builder.as_markup()

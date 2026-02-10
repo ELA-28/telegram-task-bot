@@ -23,7 +23,8 @@ from keyboards import (
     get_priority_keyboard, get_status_keyboard, get_categories_keyboard,
     get_category_actions_keyboard, get_ai_helper_keyboard,
     get_confirmation_keyboard, get_filter_keyboard, get_subtasks_keyboard,
-    get_settings_keyboard, get_time_keyboard, get_cancel_keyboard
+    get_settings_keyboard, get_time_keyboard, get_cancel_keyboard,
+    get_edit_task_keyboard
 )
 from utils import (
     format_task, format_task_short, format_category, format_datetime,
@@ -66,6 +67,13 @@ class ReminderStates(StatesGroup):
 
 class AIStates(StatesGroup):
     question = State()
+
+class EditTaskStates(StatesGroup):
+    title = State()
+    description = State()
+    priority = State()
+    deadline = State()
+    category = State()
 
 # ========== Handlers ==========
 
@@ -497,6 +505,294 @@ async def confirm_delete_task(callback: types.CallbackQuery):
                 )
     else:
         await callback.answer("Ошибка удаления", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("task_edit_"))
+async def edit_task_callback(callback: types.CallbackQuery):
+    """Меню редактирования задачи"""
+    task_id = int(callback.data.split("_")[2])
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+
+    task = await get_task_by_id(task_id, user.id)
+
+    if not task:
+        await callback.answer("Задача не найдена", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"✏️ *Редактирование задачи*\n\n"
+        f"Выберите поле для изменения:",
+        parse_mode="Markdown",
+        reply_markup=get_edit_task_keyboard(task_id)
+    )
+    await callback.answer()
+
+
+# ========== Edit Task Title ==========
+@dp.callback_query(F.data.startswith("edit_title_"))
+async def edit_title_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Начало редактирования названия"""
+    task_id = int(callback.data.split("_")[2])
+    await state.update_data(task_id=task_id)
+    await state.set_state(EditTaskStates.title)
+
+    await callback.message.answer(
+        "✏️ *Редактирование названия*\n\n"
+        "Введите новое название задачи:",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.message(EditTaskStates.title)
+async def edit_title_message(message: types.Message, state: FSMContext):
+    """Обработка нового названия"""
+    is_valid, title = validate_title(message.text)
+
+    if not is_valid:
+        await message.answer(title)
+        return
+
+    data = await state.get_data()
+    task_id = data.get('task_id')
+    user = await get_or_create_user(telegram_id=message.from_user.id)
+
+    task = await update_task(task_id, user.id, title=title)
+    await state.clear()
+
+    if task:
+        await message.answer(
+            f"✅ Название изменено на \"{title}\"!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        # Показываем обновленную задачу
+        await message.answer(
+            format_task(task),
+            parse_mode="Markdown",
+            reply_markup=get_task_actions_keyboard(task_id)
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка: задача не найдена",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+# ========== Edit Task Description ==========
+@dp.callback_query(F.data.startswith("edit_desc_"))
+async def edit_description_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Начало редактирования описания"""
+    task_id = int(callback.data.split("_")[2])
+    await state.update_data(task_id=task_id)
+    await state.set_state(EditTaskStates.description)
+
+    await callback.message.answer(
+        "✏️ *Редактирование описания*\n\n"
+        "Введите новое описание (или отправьте /skip чтобы очистить):",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.message(EditTaskStates.description)
+async def edit_description_message(message: types.Message, state: FSMContext):
+    """Обработка нового описания"""
+    if message.text == "/skip":
+        description = None
+    else:
+        description = message.text
+
+    data = await state.get_data()
+    task_id = data.get('task_id')
+    user = await get_or_create_user(telegram_id=message.from_user.id)
+
+    task = await update_task(task_id, user.id, description=description)
+    await state.clear()
+
+    if task:
+        desc_text = f"\"{description}\"" if description else "очищено"
+        await message.answer(
+            f"✅ Описание {desc_text}!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        # Показываем обновленную задачу
+        await message.answer(
+            format_task(task),
+            parse_mode="Markdown",
+            reply_markup=get_task_actions_keyboard(task_id)
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка: задача не найдена",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+# ========== Edit Task Priority ==========
+@dp.callback_query(F.data.startswith("edit_priority_"))
+async def edit_priority_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Начало редактирования приоритета"""
+    task_id = int(callback.data.split("_")[2])
+    await state.update_data(task_id=task_id)
+    await state.set_state(EditTaskStates.priority)
+
+    await callback.message.answer(
+        "✏️ *Редактирование приоритета*\n\n"
+        "Выберите новый приоритет:",
+        parse_mode="Markdown",
+        reply_markup=get_priority_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(EditTaskStates.priority, F.data.startswith("priority_"))
+async def edit_priority_select(callback: types.CallbackQuery, state: FSMContext):
+    """Выбор нового приоритета"""
+    priority = callback.data.split("_")[1]
+    data = await state.get_data()
+    task_id = data.get('task_id')
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+
+    task = await update_task(task_id, user.id, priority=priority)
+    await state.clear()
+
+    if task:
+        priority_text = translate_priority(priority)
+        await callback.message.answer(
+            f"✅ Приоритет изменен на {priority_text}!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        # Показываем обновленную задачу
+        await callback.message.answer(
+            format_task(task),
+            parse_mode="Markdown",
+            reply_markup=get_task_actions_keyboard(task_id)
+        )
+    else:
+        await callback.message.answer(
+            "❌ Ошибка: задача не найдена",
+            reply_markup=get_main_menu_keyboard()
+        )
+    await callback.answer()
+
+
+# ========== Edit Task Deadline ==========
+@dp.callback_query(F.data.startswith("edit_deadline_"))
+async def edit_deadline_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Начало редактирования дедлайна"""
+    task_id = int(callback.data.split("_")[2])
+    await state.update_data(task_id=task_id)
+    await state.set_state(EditTaskStates.deadline)
+
+    await callback.message.answer(
+        "✏️ *Редактирование дедлайна*\n\n"
+        "Введите новый дедлайн в формате: DD.MM.YYYY HH:MM\n"
+        "Или отправьте /skip чтобы убрать дедлайн:",
+        parse_mode="Markdown",
+        reply_markup=get_cancel_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.message(EditTaskStates.deadline)
+async def edit_deadline_message(message: types.Message, state: FSMContext):
+    """Обработка нового дедлайна"""
+    if message.text == "/skip":
+        deadline = None
+    else:
+        deadline = parse_deadline(message.text)
+        if not deadline:
+            await message.answer(
+                "❌ Неверный формат даты. Попробуйте еще раз или /skip:"
+            )
+            return
+
+    data = await state.get_data()
+    task_id = data.get('task_id')
+    user = await get_or_create_user(telegram_id=message.from_user.id)
+
+    task = await update_task(task_id, user.id, deadline=deadline)
+    await state.clear()
+
+    if task:
+        deadline_text = format_datetime(deadline) if deadline else "убран"
+        await message.answer(
+            f"✅ Дедлайн {deadline_text}!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        # Показываем обновленную задачу
+        await message.answer(
+            format_task(task),
+            parse_mode="Markdown",
+            reply_markup=get_task_actions_keyboard(task_id)
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка: задача не найдена",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+# ========== Edit Task Category ==========
+@dp.callback_query(F.data.startswith("edit_category_"))
+async def edit_category_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Начало редактирования категории"""
+    task_id = int(callback.data.split("_")[2])
+    await state.update_data(task_id=task_id)
+    await state.set_state(EditTaskStates.category)
+
+    # Получаем категории пользователя
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+    categories = await get_user_categories(user.id)
+
+    categories_data = [(c.id, c.name, c.color) for c in categories]
+
+    await callback.message.answer(
+        "✏️ *Редактирование категории*\n\n"
+        "Выберите новую категорию:",
+        parse_mode="Markdown",
+        reply_markup=get_categories_keyboard(categories_data, add_task=True)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(EditTaskStates.category, F.data.startswith("set_category_"))
+async def edit_category_select(callback: types.CallbackQuery, state: FSMContext):
+    """Выбор новой категории"""
+    category_data = callback.data.split("_")[2]
+
+    if category_data == "none":
+        category_id = None
+    else:
+        category_id = int(category_data)
+
+    data = await state.get_data()
+    task_id = data.get('task_id')
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+
+    task = await update_task(task_id, user.id, category_id=category_id)
+    await state.clear()
+
+    if task:
+        category_text = "убрана" if category_id is None else "изменена"
+        await callback.message.answer(
+            f"✅ Категория {category_text}!",
+            reply_markup=get_main_menu_keyboard()
+        )
+        # Показываем обновленную задачу
+        await callback.message.answer(
+            format_task(task),
+            parse_mode="Markdown",
+            reply_markup=get_task_actions_keyboard(task_id)
+        )
+    else:
+        await callback.message.answer(
+            "❌ Ошибка: задача не найдена",
+            reply_markup=get_main_menu_keyboard()
+        )
+    await callback.answer()
 
 
 # ========== Add Task ==========
