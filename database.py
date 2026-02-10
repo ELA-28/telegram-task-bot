@@ -26,7 +26,8 @@ async def init_db():
     """Инициализация базы данных - создание всех таблиц"""
     async with engine.begin() as conn:
         # Пересоздаём таблицы для обновления схемы telegram_id на BIGINT
-        await conn.run_sync(Base.metadata.drop_all)
+        # checkfirst=False заставляет удалить таблицы даже если они существуют
+        await conn.run_sync(Base.metadata.drop_all, checkfirst=False)
         await conn.run_sync(Base.metadata.create_all)
 
 
