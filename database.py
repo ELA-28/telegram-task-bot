@@ -4,11 +4,17 @@ from sqlalchemy import select, and_, or_, func
 from contextlib import asynccontextmanager
 from typing import Optional, List
 from datetime import datetime
+import ssl
 
 from models import Base, User, Task, Category, Subtask, Reminder
 from config import get_settings
 
 settings = get_settings()
+
+# Neon PostgreSQL требует SSL
+connect_args = {}
+if "postgresql" in settings.database_url:
+    connect_args = {"ssl": ssl.create_default_context()}
 
 engine = create_async_engine(
     settings.database_url,
@@ -18,6 +24,7 @@ engine = create_async_engine(
     max_overflow=10,
     pool_timeout=30,
     pool_recycle=300,
+    connect_args=connect_args if connect_args else None,
 )
 
 async_session_maker = async_sessionmaker(
