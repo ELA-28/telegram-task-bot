@@ -28,14 +28,12 @@ class Settings(BaseSettings):
                 db_url = db_url[1:]
             if db_url.endswith("'") or db_url.endswith('"'):
                 db_url = db_url[:-1]
-            # Убираем SSL параметры которые asyncpg не поддерживает в URL
-            # Neon добавляет sslmode=require и другие параметры
+            # Убираем только channel_binding, оставляем sslmode для Neon
             if "?" in db_url:
                 base_url, params = db_url.split("?", 1)
-                # Фильтруем проблемные параметры
                 clean_params = []
                 for param in params.split("&"):
-                    if not param.startswith("sslmode") and not param.startswith("channel_binding"):
+                    if not param.startswith("channel_binding"):
                         clean_params.append(param)
                 db_url = base_url
                 if clean_params:
