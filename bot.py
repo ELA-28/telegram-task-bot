@@ -233,6 +233,36 @@ async def tasks_list_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data.startswith("tasks_page_"))
+async def tasks_page_callback(callback: types.CallbackQuery):
+    """Переключение страниц в списке задач"""
+    page = int(callback.data.split("_")[2])
+    user = await get_or_create_user(telegram_id=callback.from_user.id)
+    all_tasks = await get_user_tasks(user.id)
+
+    # Показываем только невыполненные задачи
+    tasks = [t for t in all_tasks if t.status != "completed"]
+    completed_count = len(all_tasks) - len(tasks)
+
+    if not tasks:
+        await callback.answer("Нет задач", show_alert=True)
+        return
+
+    tasks_data = [
+        (t.id, t.title, t.status, t.priority)
+        for t in sorted(tasks, key=get_task_priority_score)
+    ]
+
+    completed_text = f"\n✅ Выполненных: {completed_count}" if completed_count > 0 else ""
+
+    await callback.message.edit_text(
+        f"📋 *Активные задачи* ({len(tasks)}){completed_text}\n\n"
+        f"Выберите задачу для просмотра:",
+        reply_markup=get_tasks_list_keyboard(tasks_data, page=page)
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "filter_completed")
 async def show_completed_tasks(callback: types.CallbackQuery):
     """Показать выполненные задачи"""
